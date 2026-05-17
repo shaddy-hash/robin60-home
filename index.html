@@ -24,21 +24,20 @@
       position: relative;
     }
 
-    /* Each cell has two img layers that crossfade */
-    .cell img {
+    /* Two stacked layers per cell — JS crossfades between them */
+    .layer {
       position: absolute; inset: 0;
       width: 100%; height: 100%;
       object-fit: cover;
       filter: saturate(0.88) brightness(0.65);
       transition: opacity 1.8s ease-in-out;
     }
+    .layer.front { opacity: 1; }
+    .layer.back  { opacity: 0; }
 
-    .cell img.behind { opacity: 0; }
-    .cell img.front  { opacity: 1; }
-
-    .cell:hover img.front {
+    .cell:hover .layer.front {
       filter: saturate(1.05) brightness(0.78);
-      transition: filter 0.6s ease;
+      transition: filter 0.6s ease, opacity 1.8s ease-in-out;
     }
 
     /* Slow Ken Burns on each cell - CSS only, staggered */
@@ -210,131 +209,144 @@
   </div>
 
   <script>
-    // 52 photos, 35 cells
-    // Two img layers per cell — front fades out, behind fades in, then swap
-    // No duplicate shown at the same time — tracked via Set
+  const TOTAL  = 52;
+  const CELLS  = 35;
+  const MIN_MS = 5000;
+  const MAX_MS = 13000;
 
-    const TOTAL  = 52;
-    const CELLS  = 35;
-    const MIN_MS = 4000;   // fastest a cell can swap
-    const MAX_MS = 11000;  // slowest
+  const allPhotos = Array.from({length: TOTAL}, (_, i) => `images/photo${i+1}.jpg`);
 
-    // Build photo pool: "images/photo1.jpg" ... "images/photo52.jpg"
-    const allPhotos = Array.from({length: TOTAL}, (_, i) => `images/photo${i+1}.jpg`);
+  function shuffle(arr) {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
 
-    // Shuffle helper
-    function shuffle(arr) {
-      const a = [...arr];
-      for (let i = a.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [a[i], a[j]] = [a[j], a[i]];
-      }
-      return a;
+  // Which photo index is in each cell — array of length CELLS
+  const cellPhoto = [];
+  const timers = [];   // one timer handle per cell
+  let swapping = [];   // boolean: is this cell mid-transition?
+
+  function pickNext(excludeIdx) {
+    // Build pool of photo indices not currently shown anywhere
+    const shown = new Set(cellPhoto);
+    const pool = [];
+    for (let i = 0; i < TOTAL; i++) {
+      if (!shown.has(i)) pool.push(i);
+    }
+    if (!pool.length) return -1;
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+
+  // Build grid
+  const mosaic = document.getElementById('mosaic');
+  const cellEls = [];
+
+  const initOrder = shuffle(Array.from({length: TOTAL}, (_, i) => i));
+
+  for (let c = 0; c < CELLS; c++) {
+    cellPhoto[c] = initOrder[c];
+    swapping[c]  = false;
+
+    const div = document.createElement('div');
+    div.className = 'cell';
+
+    // Two layers stacked
+    const back = document.createElement('img');
+    back.className  = 'layer back';
+    back.src = allPhotos[initOrder[c]];
+    back.alt = '';
+
+    const front = document.createElement('img');
+    front.className = 'layer front';
+    front.src = allPhotos[initOrder[c]];
+    front.alt = '';
+
+    div.appendChild(back);
+    div.appendChild(front);
+    mosaic.appendChild(div);
+    cellEls.push({ div, front, back });
+  }
+
+  function scheduleCell(c) {
+    // Clear any existing timer first
+    clearTimeout(timers[c]);
+    const delay = MIN_MS + Math.random() * (MAX_MS - MIN_MS);
+    timers[c] = setTimeout(() => attemptSwap(c), delay);
+  }
+
+  function attemptSwap(c) {
+    // If already mid-swap, just reschedule — don't stack
+    if (swapping[c]) {
+      scheduleCell(c);
+      return;
     }
 
-    // Track which photos are currently visible (by index 0-51)
-    const visible = new Set();
-
-    // Pick a random photo NOT currently visible
-    function pickNext() {
-      const pool = allPhotos.filter((_, i) => !visible.has(i));
-      if (!pool.length) return null; // shouldn't happen with 52 > 35
-      const idx = Math.floor(Math.random() * pool.length);
-      // Find the actual photo index
-      let count = 0;
-      for (let i = 0; i < TOTAL; i++) {
-        if (!visible.has(i)) {
-          if (count === idx) return i;
-          count++;
-        }
-      }
-      return null;
+    const nextIdx = pickNext(cellPhoto[c]);
+    if (nextIdx === -1) {
+      scheduleCell(c);
+      return;
     }
 
-    // Build the grid cells
-    const mosaic = document.getElementById('mosaic');
-    const cells = [];
+    swapping[c] = true;
+    const { front, back } = cellEls[c];
 
-    // Initial assignment: shuffle all photos, take first 35 for initial display
-    const initOrder = shuffle(Array.from({length: TOTAL}, (_, i) => i));
-    const initVisible = initOrder.slice(0, CELLS);
-    initVisible.forEach(i => visible.add(i));
-    const queue = initOrder.slice(CELLS); // remaining 17 waiting
+    // Load new image into back layer (invisible)
+    back.style.opacity = '0';
+    back.src = '';  // reset first to ensure onload fires reliably
 
-    for (let c = 0; c < CELLS; c++) {
-      const div = document.createElement('div');
-      div.className = 'cell';
+    const img = new Image();
+    img.onload = () => {
+      // Only proceed if we're still swapping (not cancelled)
+      if (!swapping[c]) return;
 
-      const front = document.createElement('img');
-      front.className = 'front';
-      front.src = allPhotos[initVisible[c]];
-      front.alt = '';
+      back.src = img.src;
 
-      const behind = document.createElement('img');
-      behind.className = 'behind';
-      behind.alt = '';
+      // Small RAF delay to ensure browser has painted the back layer
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          // Fade front out
+          front.style.opacity = '0';
+          // Fade back in
+          back.style.opacity  = '1';
 
-      div.appendChild(behind);
-      div.appendChild(front);
-      mosaic.appendChild(div);
+          // After transition completes, consolidate layers
+          const TRANSITION_MS = 1800;
+          setTimeout(() => {
+            // Copy back into front, reset back
+            front.src = back.src;
+            front.style.opacity = '1';
+            back.style.opacity  = '0';
 
-      cells.push({
-        el: div,
-        front,
-        behind,
-        currentIdx: initVisible[c]  // which photo is currently showing
+            // Update state
+            cellPhoto[c] = nextIdx;
+            swapping[c]  = false;
+
+            // Schedule next swap
+            scheduleCell(c);
+          }, TRANSITION_MS + 50);
+        });
       });
-    }
+    };
 
-    // Schedule random swaps
-    function scheduleSwap(cell) {
-      const delay = MIN_MS + Math.random() * (MAX_MS - MIN_MS);
-      setTimeout(() => doSwap(cell), delay);
-    }
+    img.onerror = () => {
+      swapping[c] = false;
+      scheduleCell(c);
+    };
 
-    function doSwap(cell) {
-      const nextIdx = pickNext();
-      if (nextIdx === null) {
-        scheduleSwap(cell);
-        return;
-      }
+    img.src = allPhotos[nextIdx];
+  }
 
-      // Load next photo into behind layer
-      cell.behind.src = allPhotos[nextIdx];
-
-      // Wait for image to load before crossfading
-      const doFade = () => {
-        // Swap opacity
-        cell.front.classList.remove('front');
-        cell.front.classList.add('behind');
-        cell.behind.classList.remove('behind');
-        cell.behind.classList.add('front');
-
-        // Update tracking
-        visible.delete(cell.currentIdx);
-        visible.add(nextIdx);
-        cell.currentIdx = nextIdx;
-
-        // Swap references
-        const tmp = cell.front;
-        cell.front = cell.behind;
-        cell.behind = tmp;
-
-        // Schedule next swap for this cell
-        scheduleSwap(cell);
-      };
-
-      if (cell.behind.complete) {
-        doFade();
-      } else {
-        cell.behind.onload = doFade;
-        cell.behind.onerror = () => scheduleSwap(cell); // skip broken image
-      }
-    }
-
-    // Stagger initial swap schedules randomly across all cells
-    cells.forEach(cell => scheduleSwap(cell));
-  </script>
+  // Stagger initial schedules so cells don't all fire at once
+  for (let c = 0; c < CELLS; c++) {
+    // Spread first swaps randomly across the first MIN_MS window
+    const firstDelay = Math.random() * MAX_MS;
+    timers[c] = setTimeout(() => attemptSwap(c), firstDelay);
+  }
+</script>
 
 </body>
 </html>
